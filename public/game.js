@@ -6,13 +6,13 @@ const WALL_HEIGHT    = 3.2;
 const EYE_HEIGHT     = 1.62;
 const MOVE_SPEED     = 5.2;
 const COLLIDE_R      = 0.38;
-const LASER_LIFE_MS  = 220;
-const SHOOT_CD_MS    = 420;
+const BOLT_SPEED     = 22;    // world units per second
+const BOLT_MAX_DIST  = 50;    // max travel distance before despawn
+const BOLT_COLOR     = 0xFF2200;  // Star Wars-style bright red
 const MOVE_EMIT_HZ   = 50;   // ms between position broadcasts
 
 // Index 0 = yellow player, 1 = blue player
 const SUIT_COLOR  = [0xFFCC00, 0x1166EE];
-const LASER_COLOR = [0xFF3300, 0x00CCFF];
 
 // ─── Three.js scene ───────────────────────────────────────────────────────────
 const scene    = new THREE.Scene();
@@ -166,36 +166,45 @@ function hitsWall(wx, wz, radius) {
          isWallAt(wx, wz + radius) || isWallAt(wx, wz - radius);
 }
 
-// ─── Laser helpers ────────────────────────────────────────────────────────────
-const lasers = [];
+// ─── Bolt helpers ─────────────────────────────────────────────────────────────
+const bolts = [];
+let canShoot = true;
 
-function laserEnd(origin, dir) {
-  const step = 0.3;
-  const max  = 50;
-  const p    = origin.clone();
-  for (let d = step; d < max; d += step) {
-    p.addScaledVector(dir, step);
-    if (p.y >= 0 && p.y <= WALL_HEIGHT && isWallAt(p.x, p.z)) return p.clone();
-  }
-  return origin.clone().addScaledVector(dir, max);
+function spawnBolt(origin, dir, isLocal) {
+  const normDir = dir.clone().normalize();
+
+  // Elongated bolt capsule oriented along travel direction
+  const boltMat = new THREE.MeshBasicMaterial({ color: BOLT_COLOR });
+  const boltGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.42, 8);
+  const boltMesh = new THREE.Mesh(boltGeo, boltMat);
+  boltMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normDir);
+  boltMesh.position.copy(origin);
+  scene.add(boltMesh);
+
+  // Soft glow sphere around the bolt
+  const glowMat = new THREE.MeshBasicMaterial({ color: 0xFF6633, transparent: true, opacity: 0.35 });
+  const glowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.10, 8, 6), glowMat);
+  glowMesh.position.copy(origin);
+  scene.add(glowMesh);
+
+  bolts.push({ mesh: boltMesh, glow: glowMesh, pos: origin.clone(), dir: normDir, isLocal, traveled: 0 });
 }
 
-function spawnLaser(origin, dir, colorHex) {
-  const end = laserEnd(origin, dir);
-  const geo = new THREE.BufferGeometry().setFromPoints([origin.clone(), end]);
-  const mat = new THREE.LineBasicMaterial({ color: colorHex });
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  lasers.push({ mesh: line, born: Date.now() });
+function removeBolt(i) {
+  const bolt = bolts[i];
+  scene.remove(bolt.mesh);
+  scene.remove(bolt.glow);
+  bolts.splice(i, 1);
+  if (bolt.isLocal) canShoot = true;
+}
 
-  // Muzzle glow
-  const glow = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07, 6, 6),
-    new THREE.MeshBasicMaterial({ color: colorHex })
-  );
-  glow.position.copy(origin);
-  scene.add(glow);
-  lasers.push({ mesh: glow, born: Date.now() });
+function checkBoltHit(pos) {
+  for (const [id, op] of Object.entries(otherPlayers)) {
+    const center = op.model.position.clone();
+    center.y += 0.45;
+    if (pos.distanceTo(center) < 0.6) return id;
+  }
+  return null;
 }
 
 // ─── Remote players ───────────────────────────────────────────────────────────
@@ -209,20 +218,6 @@ function addRemotePlayer(p) {
   otherPlayers[p.id] = { model, slot: p.slot };
   otherHealth[p.slot] = p.health !== undefined ? p.health : 100;
   updateHUD();
-}
-
-// ─── Hit detection (sphere sweep against remote player bounding cylinder) ─────
-function checkHit(origin, dir) {
-  for (const [id, op] of Object.entries(otherPlayers)) {
-    const centre = op.model.position.clone();
-    centre.y += 0.45;        // aim centre of torso
-    const toTarget = centre.clone().sub(origin);
-    const t = toTarget.dot(dir);
-    if (t < 0.1 || t > 40) continue;
-    const closest = origin.clone().addScaledVector(dir, t);
-    if (closest.distanceTo(centre) < 0.58) return id;
-  }
-  return null;
 }
 
 // ─── HUD helpers ──────────────────────────────────────────────────────────────
@@ -261,15 +256,12 @@ let yaw      = 0;
 let pitch    = 0;
 
 const keys       = {};
-let lastShot     = 0;
 let lastMoveSent = 0;
 
 // ─── Shooting ────────────────────────────────────────────────────────────────
 function shoot() {
-  if (isDead || !maze) return;
-  const now = Date.now();
-  if (now - lastShot < SHOOT_CD_MS) return;
-  lastShot = now;
+  if (isDead || !maze || !canShoot) return;
+  canShoot = false;
 
   // Muzzle just below eye level
   const origin = camera.position.clone();
@@ -279,11 +271,8 @@ function shoot() {
     .applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'))
     .normalize();
 
-  spawnLaser(origin, dir, LASER_COLOR[mySlot]);
+  spawnBolt(origin, dir, true);
   socket.emit('shoot', { origin: origin.toArray(), direction: dir.toArray() });
-
-  const hitId = checkHit(origin, dir);
-  if (hitId) socket.emit('hit', { targetId: hitId });
 }
 
 // ─── Pointer lock ─────────────────────────────────────────────────────────────
@@ -354,6 +343,13 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   if (myLbl) {
     myLbl.style.color = slot === 0 ? '#FFD700' : '#4499FF';
   }
+
+  // If an opponent is already in the game, update the status message
+  const st = document.getElementById('statusMsg');
+  if (st && players.length > 1) {
+    st.textContent = '⚠️  Enemy astronaut detected!';
+  }
+
   updateHUD();
 });
 
@@ -376,7 +372,7 @@ socket.on('playerShot', ({ shooterId, slot, origin, direction }) => {
   if (shooterId === socket.id) return;
   const o = new THREE.Vector3(...origin);
   const d = new THREE.Vector3(...direction).normalize();
-  spawnLaser(o, d, LASER_COLOR[slot]);
+  spawnBolt(o, d, false);
 });
 
 socket.on('playerHit', ({ targetId, health }) => {
@@ -472,12 +468,25 @@ function animate() {
     lastMoveSent = now;
   }
 
-  // Expire lasers
-  for (let i = lasers.length - 1; i >= 0; i--) {
-    if (now - lasers[i].born > LASER_LIFE_MS) {
-      scene.remove(lasers[i].mesh);
-      lasers.splice(i, 1);
+  // Update bolts – move forward, check collisions
+  for (let i = bolts.length - 1; i >= 0; i--) {
+    const bolt = bolts[i];
+    const dist = BOLT_SPEED * dt;
+    bolt.traveled += dist;
+    bolt.pos.addScaledVector(bolt.dir, dist);
+    bolt.mesh.position.copy(bolt.pos);
+    bolt.glow.position.copy(bolt.pos);
+
+    let hit = bolt.traveled >= BOLT_MAX_DIST ||
+              (bolt.pos.y >= 0 && bolt.pos.y <= WALL_HEIGHT && isWallAt(bolt.pos.x, bolt.pos.z));
+    if (!hit && bolt.isLocal) {
+      const hitId = checkBoltHit(bolt.pos);
+      if (hitId) {
+        socket.emit('hit', { targetId: hitId });
+        hit = true;
+      }
     }
+    if (hit) removeBolt(i);
   }
 
   renderer.render(scene, camera);
