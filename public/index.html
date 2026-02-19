@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Worriors – Space Suit FPS</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: 'Courier New', Courier, monospace;
+      color: #fff;
+    }
+    canvas { display: block; }
+
+    /* ── Waiting / connecting screen ──────────────────── */
+    #waiting {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      gap: 14px;
+      background: rgba(0,0,8,0.94);
+      z-index: 20;
+      font-size: 2.4rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    #waiting .sub {
+      font-size: 0.85rem;
+      color: #556;
+      letter-spacing: 0.1em;
+    }
+
+    /* ── In-game HUD ──────────────────────────────────── */
+    #gameUI {
+      display: none;
+      position: fixed; inset: 0;
+      pointer-events: none;
+    }
+
+    /* Crosshair */
+    #crosshair {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 1.5rem;
+      color: rgba(255,255,255,0.7);
+      user-select: none;
+    }
+
+    /* Status line */
+    #statusMsg {
+      position: absolute;
+      top: 14px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      color: rgba(255,255,200,0.7);
+      white-space: nowrap;
+    }
+
+    /* Health bars */
+    #hud {
+      position: absolute;
+      bottom: 22px; left: 18px;
+    }
+    .hbar-row {
+      display: flex; align-items: center;
+      margin-bottom: 7px; gap: 8px;
+    }
+    .hbar-label {
+      width: 56px; font-size: 0.65rem;
+      letter-spacing: 0.06em; text-align: right;
+      text-transform: uppercase;
+    }
+    .hbar-track {
+      width: 190px; height: 13px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 2px; overflow: hidden;
+    }
+    #myHealthBar {
+      height: 100%; width: 100%;
+      background: #33FF66;
+      transition: width 0.25s ease;
+    }
+    #enemyHealthBar {
+      height: 100%; width: 100%;
+      background: #FF4444;
+      transition: width 0.25s ease;
+    }
+
+    /* Player colour label */
+    #myColorLabel {
+      position: absolute;
+      top: 14px; right: 16px;
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+    }
+
+    /* Damage flash overlay */
+    #damageFlash {
+      position: fixed; inset: 0;
+      background: #FF0000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.35s ease;
+    }
+
+    /* Big messages */
+    .bigmsg {
+      display: none;
+      position: absolute;
+      top: 32%; left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 2.2rem;
+      font-weight: bold;
+      letter-spacing: 0.12em;
+      text-align: center;
+      text-shadow: 0 0 18px currentColor;
+    }
+    #deathMsg { color: #FF4444; }
+    #killMsg  { color: #44FF88; }
+
+    /* Pointer-lock prompt */
+    #lockPrompt {
+      position: fixed;
+      bottom: 22px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      letter-spacing: 0.14em;
+      color: rgba(255,255,255,0.38);
+      pointer-events: none;
+    }
+
+    /* Controls hint */
+    #controls {
+      position: absolute;
+      bottom: 18px; right: 16px;
+      font-size: 0.62rem;
+      color: rgba(255,255,255,0.3);
+      line-height: 1.8;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Waiting / connecting screen -->
+  <div id="waiting">
+    <div>🚀 WORRIORS</div>
+    <div class="sub" id="waitingSub">Connecting…</div>
+  </div>
+
+  <!-- In-game HUD -->
+  <div id="gameUI">
+    <div id="crosshair">+</div>
+    <div id="statusMsg">Waiting for opponent…</div>
+    <div id="myColorLabel"></div>
+
+    <div id="hud">
+      <div class="hbar-row">
+        <span class="hbar-label" id="myLabel">YOU</span>
+        <div class="hbar-track"><div id="myHealthBar"></div></div>
+      </div>
+      <div class="hbar-row">
+        <span class="hbar-label" style="color:#FF8888">ENEMY</span>
+        <div class="hbar-track"><div id="enemyHealthBar"></div></div>
+      </div>
+    </div>
+
+    <div class="bigmsg" id="deathMsg">YOU DIED<br><small style="font-size:0.4em">Respawning…</small></div>
+    <div class="bigmsg" id="killMsg">ENEMY ELIMINATED!</div>
+
+    <div id="controls">
+      WASD / ↑↓←→ — Move<br>
+      Mouse — Look<br>
+      Click — Fire laser
+    </div>
+  </div>
+
+  <div id="damageFlash"></div>
+  <div id="lockPrompt">CLICK TO LOCK MOUSE &amp; PLAY</div>
+
+  <!-- Three.js r128 (served locally) -->
+  <script src="/three.min.js"></script>
+  <!-- Socket.IO client (served by server) -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Game -->
+  <script src="/game.js"></script>
+</body>
+</html>

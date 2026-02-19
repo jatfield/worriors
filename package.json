@@ -1,0 +1,14 @@
+{
+  "name": "worriors",
+  "version": "1.0.0",
+  "description": "Browser-based multiplayer FPS in three.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "4.22.1",
+    "socket.io": "4.8.3",
+    "three": "^0.128.0"
+  }
+}
