@@ -60,9 +60,9 @@ let   gameOver = false;
 
 // ─── Monster helpers ──────────────────────────────────────────────────────────
 const DIRS4               = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-const MONSTER_SPEED       = 2.5;   // world units / sec
+const MONSTER_SPEED       = 10;   // world units / sec
 const MONSTER_RADIUS      = 0.55;  // movement collision radius
-const MONSTER_KILL_RADIUS = 0.9;   // distance at which monster kills player
+const MONSTER_KILL_RADIUS = 1.5;   // distance at which monster kills player
 
 function mazeIsWall(wx, wz) {
   const c = Math.round(wx / CELL_SIZE);

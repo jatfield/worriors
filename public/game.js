@@ -4,7 +4,7 @@
 // ─── Constants ───────────────────────────────────────────────────────────────
 const WALL_HEIGHT    = 3.2;
 const EYE_HEIGHT     = 1.62;
-const MOVE_SPEED     = 5.2;
+const MOVE_SPEED     = 8;
 const COLLIDE_R      = 0.38;
 const BOLT_SPEED     = 22;    // world units per second
 const BOLT_MAX_DIST  = 50;    // max travel distance before despawn
@@ -702,12 +702,12 @@ function playPewSound() {
     const t = ctx.currentTime;
     osc.type = 'sawtooth';
     // Frequency sweep: 880 Hz → 140 Hz (drawn-out doppler drop)
-    osc.frequency.setValueAtTime(880, t);
-    osc.frequency.exponentialRampToValueAtTime(140, t + 0.55);
+    osc.frequency.setValueAtTime(480, t);
+    osc.frequency.exponentialRampToValueAtTime(140, t + 1);
 
     gain.gain.setValueAtTime(0.001, t);
     gain.gain.linearRampToValueAtTime(0.22, t + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.58);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 1);
 
     lfo.start(t);
     osc.start(t);

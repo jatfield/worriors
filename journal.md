@@ -43,3 +43,12 @@ Maybe we can have a top down view which looks just like the original game.
 - The players on the radar are oriented in the same direction always, which is better, but not what I asked for.
 - The wolf works, although it only kills on collision with the head, and it can't be shot.
 - The shooting sound is high, but has a midi vibe that I like, and it's not like it can get close to the SID.
+
+4. "There are gaps in the walls, and they are still too thick. Make them thinner, and the radar should represent the 3D layout correctly. The players should be able to shoot the wolf, and it should respawn after a delay."
+
+- I can change the movement speeds by playing around with the constants
+- The monsters should speed up as time passes, though
+- I can also finetune the sound
+- The hitbox size is also adjustable
+- The gaps are fixed, but the corridors are too wide now
+- The wolf spawns in the same spot, this should be random
