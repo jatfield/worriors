@@ -217,7 +217,9 @@ function addRemotePlayer(p) {
   scene.add(model);
   otherPlayers[p.id] = { model, slot: p.slot };
   otherHealth[p.slot] = p.health !== undefined ? p.health : 100;
+  otherLivesCount[p.slot] = p.lives !== undefined ? p.lives : 3;
   updateHUD();
+  updateLives();
 }
 
 // ─── HUD helpers ──────────────────────────────────────────────────────────────
@@ -250,17 +252,20 @@ function flashDamage() {
 // ─── Player state ─────────────────────────────────────────────────────────────
 let mySlot   = -1;
 let myHealth = 100;
+let myLives  = 3;
 let isDead   = false;
+let gameEnded = false;
 const myPos  = new THREE.Vector3();
 let yaw      = 0;
 let pitch    = 0;
 
-const keys       = {};
+const keys          = {};
+const otherLivesCount = {};   // slot → lives remaining
 let lastMoveSent = 0;
 
 // ─── Shooting ────────────────────────────────────────────────────────────────
 function shoot() {
-  if (isDead || !maze || !canShoot) return;
+  if (isDead || !maze || !canShoot || gameEnded) return;
   canShoot = false;
 
   // Muzzle just below eye level
@@ -276,7 +281,9 @@ function shoot() {
 }
 
 // ─── Pointer lock ─────────────────────────────────────────────────────────────
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
+  const chatPanel = document.getElementById('chatPanel');
+  if (chatPanel && chatPanel.contains(e.target)) return;
   if (maze && !document.pointerLockElement) {
     renderer.domElement.requestPointerLock();
   }
@@ -299,8 +306,220 @@ document.addEventListener('mousedown', (e) => {
   if (document.pointerLockElement === renderer.domElement && e.button === 0) shoot();
 });
 
-document.addEventListener('keydown', (e) => { keys[e.code] = true; });
+document.addEventListener('keydown', (e) => {
+  const chatInput = document.getElementById('chatInput');
+  if (document.activeElement === chatInput) return;
+  if (e.code === 'KeyT' && !e.repeat && maze) {
+    e.preventDefault();
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (chatInput) chatInput.focus();
+    return;
+  }
+  keys[e.code] = true;
+});
 document.addEventListener('keyup',   (e) => { keys[e.code] = false; });
+
+// ─── Minimap ──────────────────────────────────────────────────────────────────
+let minimapStaticCanvas = null;   // cached static maze layer
+
+function buildMinimapStatic() {
+  const G = maze.length;
+  const W = 180;
+  const cellPx = W / G;
+  const cvs = document.createElement('canvas');
+  cvs.width  = W;
+  cvs.height = W;
+  const ctx = cvs.getContext('2d');
+
+  ctx.fillStyle = '#06060f';
+  ctx.fillRect(0, 0, W, W);
+
+  ctx.fillStyle = '#1e2d3d';
+  for (let r = 0; r < G; r++) {
+    for (let c = 0; c < G; c++) {
+      if (maze[r][c] === 1) {
+        ctx.fillRect(c * cellPx, r * cellPx, cellPx, cellPx);
+      }
+    }
+  }
+  minimapStaticCanvas = cvs;
+}
+
+function drawMinimapAstronaut(ctx, x, y, plyYaw, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  // canvas rotation = -yaw (world yaw=0 faces -Z = "up" on top-down canvas)
+  ctx.rotate(-plyYaw);
+
+  // Helmet (white)
+  ctx.fillStyle = '#dddddd';
+  ctx.beginPath();
+  ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Visor (tinted with player color)
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.arc(0.5, -5, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1.0;
+
+  // Torso
+  ctx.fillStyle = color;
+  ctx.fillRect(-2.5, -2.5, 5, 4);
+
+  // Backpack (light grey, on the back side)
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillRect(-2.5, -2, 1.2, 2);
+
+  // Legs
+  ctx.fillStyle = color;
+  ctx.fillRect(-2, 1.5, 1.8, 2.8);
+  ctx.fillRect(0.2, 1.5, 1.8, 2.8);
+
+  ctx.restore();
+}
+
+function drawMinimap() {
+  if (!maze) return;
+  const canvas = document.getElementById('minimapCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const G = maze.length;
+  const cellPx = W / G;
+
+  // Blit cached static maze layer
+  if (minimapStaticCanvas) {
+    ctx.drawImage(minimapStaticCanvas, 0, 0);
+  } else {
+    ctx.fillStyle = '#06060f';
+    ctx.fillRect(0, 0, W, W);
+  }
+
+  // World position → canvas position
+  function toCanvas(wx, wz) {
+    return [wx / CELL_SIZE * cellPx, wz / CELL_SIZE * cellPx];
+  }
+
+  // Bolts
+  bolts.forEach(bolt => {
+    const [bx, by] = toCanvas(bolt.pos.x, bolt.pos.z);
+    ctx.fillStyle = 'rgba(255,80,0,0.45)';
+    ctx.beginPath();
+    ctx.arc(bx, by, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FF2200';
+    ctx.beginPath();
+    ctx.arc(bx, by, 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Remote players
+  for (const op of Object.values(otherPlayers)) {
+    const [px, pz] = toCanvas(op.model.position.x, op.model.position.z);
+    drawMinimapAstronaut(ctx, px, pz, op.model.rotation.y,
+                         op.slot === 0 ? '#FFD700' : '#4499FF');
+  }
+
+  // My player
+  if (mySlot >= 0) {
+    const [mx, mz] = toCanvas(myPos.x, myPos.z);
+    drawMinimapAstronaut(ctx, mx, mz, yaw, mySlot === 0 ? '#FFD700' : '#4499FF');
+  }
+}
+
+// ─── Lives display ────────────────────────────────────────────────────────────
+function drawLifeIcon(ctx, x, y, color, alive) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.globalAlpha = alive ? 1.0 : 0.18;
+
+  // Helmet
+  ctx.fillStyle = '#dddddd';
+  ctx.beginPath();
+  ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Visor
+  ctx.fillStyle = color;
+  ctx.globalAlpha = alive ? 0.7 : 0.18;
+  ctx.beginPath();
+  ctx.arc(0.5, -5, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = alive ? 1.0 : 0.18;
+
+  // Body
+  ctx.fillStyle = color;
+  ctx.fillRect(-2.5, -2.5, 5, 4);
+
+  // Legs
+  ctx.fillRect(-2, 1.5, 1.8, 2.8);
+  ctx.fillRect(0.2, 1.5, 1.8, 2.8);
+
+  ctx.restore();
+}
+
+function updateLives() {
+  const canvas = document.getElementById('livesCanvas');
+  if (!canvas || mySlot < 0) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const myColor = mySlot === 0 ? '#FFD700' : '#4499FF';
+
+  // Row 1 – my lives (centred at y=14)
+  ctx.fillStyle = 'rgba(255,255,255,0.38)';
+  ctx.font = '7px Courier New';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('YOU', 1, 14);
+  for (let i = 0; i < 3; i++) {
+    drawLifeIcon(ctx, 30 + i * 22, 14, myColor, i < myLives);
+  }
+
+  // Row 2 – enemy lives (centred at y=34)
+  const enemyOp = Object.values(otherPlayers)[0];
+  if (enemyOp) {
+    const enemyColor = enemyOp.slot === 0 ? '#FFD700' : '#4499FF';
+    const eL = otherLivesCount[enemyOp.slot] !== undefined ? otherLivesCount[enemyOp.slot] : 3;
+    ctx.fillStyle = 'rgba(255,255,255,0.38)';
+    ctx.fillText('FOE', 1, 34);
+    for (let i = 0; i < 3; i++) {
+      drawLifeIcon(ctx, 30 + i * 22, 34, enemyColor, i < eL);
+    }
+  }
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+function sendChat() {
+  const chatInput = document.getElementById('chatInput');
+  if (!chatInput) return;
+  const text = chatInput.value.trim();
+  if (!text || !maze) return;
+  socket.emit('chat', text);
+  chatInput.value = '';
+  chatInput.blur();
+  if (maze) renderer.domElement.requestPointerLock();
+}
+
+(function initChat() {
+  const chatInput  = document.getElementById('chatInput');
+  const chatSendBtn = document.getElementById('chatSend');
+  if (chatInput) {
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.code === 'Enter') {
+        e.stopPropagation();
+        sendChat();
+      } else if (e.code === 'Escape') {
+        e.stopPropagation();
+        chatInput.blur();
+        if (maze) renderer.domElement.requestPointerLock();
+      }
+    });
+  }
+  if (chatSendBtn) chatSendBtn.addEventListener('click', sendChat);
+}());
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 /* global io */
@@ -317,10 +536,12 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   CELL_SIZE = cellSize;
 
   buildMaze(maze, CELL_SIZE);
+  buildMinimapStatic();
 
   players.forEach(p => {
     if (p.id === myId) {
       myPos.set(p.position.x, p.position.y, p.position.z);
+      myLives = p.lives !== undefined ? p.lives : 3;
     } else {
       addRemotePlayer(p);
     }
@@ -333,6 +554,11 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
 
   document.getElementById('waiting').style.display = 'none';
   document.getElementById('gameUI').style.display  = 'block';
+
+  const chatPanel = document.getElementById('chatPanel');
+  if (chatPanel) chatPanel.style.display = 'block';
+  const chatHint = document.getElementById('chatHint');
+  if (chatHint) chatHint.style.display = 'none';
 
   const lbl = document.getElementById('myColorLabel');
   if (lbl) {
@@ -351,6 +577,7 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   }
 
   updateHUD();
+  updateLives();
 });
 
 socket.on('playerJoined', (p) => {
@@ -386,19 +613,50 @@ socket.on('playerHit', ({ targetId, health }) => {
   }
 });
 
-socket.on('playerKilled', ({ targetId, killerId }) => {
+socket.on('playerKilled', ({ targetId, killerId, lives }) => {
   if (targetId === socket.id) {
+    myLives  = lives;
     isDead   = true;
     myHealth = 0;
     showMsg('deathMsg', 3000);
+    updateLives();
   } else if (killerId === socket.id) {
     showMsg('killMsg', 3000);
   }
   if (targetId !== socket.id) {
     const op = otherPlayers[targetId];
-    if (op) { otherHealth[op.slot] = 0; }
+    if (op) {
+      otherHealth[op.slot] = 0;
+      if (lives !== undefined) otherLivesCount[op.slot] = lives;
+      updateLives();
+    }
   }
   updateHUD();
+});
+
+socket.on('gameOver', ({ loserId, winnerId }) => {
+  gameEnded = true;
+  canShoot  = false;
+  const el = document.getElementById('gameOverMsg');
+  if (el) {
+    el.textContent = (winnerId === socket.id) ? '🏆 VICTORY!' : '💀 DEFEATED!';
+    el.style.display = 'block';
+  }
+});
+
+socket.on('chatMsg', ({ slot, text }) => {
+  const chatLog = document.getElementById('chatLog');
+  if (!chatLog) return;
+  const color = slot === 0 ? '#FFD700' : '#4499FF';
+  const name  = slot === 0 ? 'YELLOW' : 'BLUE';
+  const div   = document.createElement('div');
+  const nameSpan = document.createElement('span');
+  nameSpan.style.color = color;
+  nameSpan.textContent = name;
+  div.appendChild(nameSpan);
+  div.appendChild(document.createTextNode(': ' + text));
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
 });
 
 socket.on('playerRespawned', ({ id, position }) => {
@@ -488,6 +746,8 @@ function animate() {
     }
     if (hit) removeBolt(i);
   }
+
+  drawMinimap();
 
   renderer.render(scene, camera);
 }
