@@ -45,7 +45,7 @@ function generateMaze(rooms) {
   return grid;
 }
 
-const maze = generateMaze(MAZE_ROOMS);
+let maze = generateMaze(MAZE_ROOMS);
 
 // Room (0,0) → grid (1,1); Room (N-1,N-1) → grid (2N-1, 2N-1)
 const START_POSITIONS = [
@@ -57,6 +57,125 @@ const START_POSITIONS = [
 const players = {};
 const slots   = [false, false];   // which player slots are occupied
 let   gameOver = false;
+
+// ─── Monster helpers ──────────────────────────────────────────────────────────
+const DIRS4               = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const MONSTER_SPEED       = 2.5;   // world units / sec
+const MONSTER_RADIUS      = 0.55;  // movement collision radius
+const MONSTER_KILL_RADIUS = 0.9;   // distance at which monster kills player
+
+function mazeIsWall(wx, wz) {
+  const c = Math.round(wx / CELL_SIZE);
+  const r = Math.round(wz / CELL_SIZE);
+  if (r < 0 || r >= maze.length || c < 0 || c >= maze[0].length) return true;
+  return maze[r][c] === 1;
+}
+
+function mazeHitsWall(wx, wz, radius) {
+  return mazeIsWall(wx + radius, wz) || mazeIsWall(wx - radius, wz) ||
+         mazeIsWall(wx, wz + radius) || mazeIsWall(wx, wz - radius);
+}
+
+// Monster starts near maze centre (grid cell MAZE_ROOMS, MAZE_ROOMS)
+const monster = {
+  position:     { x: CELL_SIZE * MAZE_ROOMS, y: 0, z: CELL_SIZE * MAZE_ROOMS },
+  dir:          { x: 1, z: 0 },
+  angle:        0,
+  lastKillTime: 0,
+};
+
+// ─── Game restart ─────────────────────────────────────────────────────────────
+function scheduleRestart() {
+  setTimeout(() => {
+    maze     = generateMaze(MAZE_ROOMS);
+    gameOver = false;
+    for (const p of Object.values(players)) {
+      p.health   = 100;
+      p.dead     = false;
+      p.lives    = 3;
+      p.position = { ...START_POSITIONS[p.slot] };
+    }
+    monster.position     = { x: CELL_SIZE * MAZE_ROOMS, y: 0, z: CELL_SIZE * MAZE_ROOMS };
+    monster.dir          = { x: 1, z: 0 };
+    monster.angle        = 0;
+    monster.lastKillTime = 0;
+    io.emit('gameRestart', { maze, players: Object.values(players) });
+  }, 5000);
+}
+
+// ─── Monster AI (10 Hz) ───────────────────────────────────────────────────────
+let lastMonsterTick = Date.now();
+
+setInterval(() => {
+  if (gameOver) return;
+
+  const now = Date.now();
+  const dt  = Math.min((now - lastMonsterTick) / 1000, 0.1);
+  lastMonsterTick = now;
+
+  const step = MONSTER_SPEED * dt;
+  const nx   = monster.position.x + monster.dir.x * step;
+  const nz   = monster.position.z + monster.dir.z * step;
+
+  if (!mazeHitsWall(nx, nz, MONSTER_RADIUS)) {
+    monster.position.x = nx;
+    monster.position.z = nz;
+    // Occasionally turn at junctions
+    if (Math.random() < 0.015) {
+      const open = DIRS4.filter(([dx, dz]) =>
+        !mazeHitsWall(monster.position.x + dx * step * 4,
+                      monster.position.z + dz * step * 4, MONSTER_RADIUS));
+      if (open.length > 0) {
+        const pick = open[Math.floor(Math.random() * open.length)];
+        monster.dir = { x: pick[0], z: pick[1] };
+      }
+    }
+  } else {
+    // Blocked – choose an open direction
+    const open = DIRS4.filter(([dx, dz]) =>
+      !mazeHitsWall(monster.position.x + dx * step * 4,
+                    monster.position.z + dz * step * 4, MONSTER_RADIUS));
+    if (open.length > 0) {
+      const pick = open[Math.floor(Math.random() * open.length)];
+      monster.dir = { x: pick[0], z: pick[1] };
+    }
+  }
+  monster.angle = Math.atan2(monster.dir.x, monster.dir.z);
+
+  if (Object.keys(players).length > 0) {
+    io.emit('monsterMoved', { position: monster.position, angle: monster.angle });
+  }
+
+  // Kill check
+  for (const [sid, p] of Object.entries(players)) {
+    if (p.dead || gameOver) continue;
+    const dx   = p.position.x - monster.position.x;
+    const dz   = p.position.z - monster.position.z;
+    if (dx * dx + dz * dz < MONSTER_KILL_RADIUS * MONSTER_KILL_RADIUS &&
+        now - monster.lastKillTime > 1500) {
+      monster.lastKillTime = now;
+      p.health = 0;
+      p.dead   = true;
+      p.lives  = Math.max(0, p.lives - 1);
+      io.emit('playerKilled', { targetId: sid, killerId: 'monster', lives: p.lives });
+      if (p.lives > 0) {
+        setTimeout(() => {
+          const t = players[sid];
+          if (!t) return;
+          t.health   = 100;
+          t.dead     = false;
+          t.position = { ...START_POSITIONS[t.slot] };
+          io.emit('playerRespawned', { id: sid, position: t.position });
+        }, 3000);
+      } else {
+        gameOver = true;
+        const winnerId = Object.keys(players).find(id => id !== sid) || 'monster';
+        io.emit('gameOver', { loserId: sid, winnerId });
+        scheduleRestart();
+      }
+    }
+  }
+}, 100);
 
 io.on('connection', (socket) => {
   const slot = slots.findIndex(s => !s);
@@ -77,13 +196,14 @@ io.on('connection', (socket) => {
     dead:     false,
   };
 
-  // Send init data to the new player
+  // Send init data to the new player (includes monster position)
   socket.emit('init', {
     myId:     socket.id,
     slot,
     maze,
     cellSize: CELL_SIZE,
     players:  Object.values(players),
+    monster:  { position: monster.position, angle: monster.angle },
   });
 
   // Notify everyone else
@@ -110,7 +230,7 @@ io.on('connection', (socket) => {
     target.health = Math.max(0, target.health - 25);
     io.emit('playerHit', { targetId, health: target.health });
     if (target.health <= 0) {
-      target.dead = true;
+      target.dead  = true;
       target.lives = Math.max(0, target.lives - 1);
       io.emit('playerKilled', { targetId, killerId: socket.id, lives: target.lives });
       if (target.lives > 0) {
@@ -125,6 +245,7 @@ io.on('connection', (socket) => {
       } else {
         gameOver = true;
         io.emit('gameOver', { loserId: targetId, winnerId: socket.id });
+        scheduleRestart();
       }
     }
   });

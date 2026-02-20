@@ -10,6 +10,7 @@ const BOLT_SPEED     = 22;    // world units per second
 const BOLT_MAX_DIST  = 50;    // max travel distance before despawn
 const BOLT_COLOR     = 0xFF2200;  // Star Wars-style bright red
 const MOVE_EMIT_HZ   = 50;   // ms between position broadcasts
+const WALL_THICK_RATIO = 0.35; // wall width as fraction of CELL_SIZE
 
 // Index 0 = yellow player, 1 = blue player
 const SUIT_COLOR  = [0xFFCC00, 0x1166EE];
@@ -95,50 +96,158 @@ function makeSuit(suitColor) {
   return g;
 }
 
+// ─── Wolf monster model (large blue wolf) ─────────────────────────────────────
+function makeWolf() {
+  const g        = new THREE.Group();
+  const blue     = new THREE.MeshLambertMaterial({ color: 0x1155DD });
+  const darkBlue = new THREE.MeshLambertMaterial({ color: 0x0a2266 });
+  const eyeMat   = new THREE.MeshLambertMaterial({ color: 0xFF2200, emissive: new THREE.Color(0xFF0000) });
+
+  function mesh(geo, mat, x, y, z, rx, ry, rz) {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    if (rx || ry || rz) m.rotation.set(rx || 0, ry || 0, rz || 0);
+    g.add(m);
+    return m;
+  }
+
+  // Paws (touching floor y ≈ 0)
+  mesh(new THREE.BoxGeometry(0.22, 0.12, 0.26), darkBlue, -0.30, 0.06,  0.50);
+  mesh(new THREE.BoxGeometry(0.22, 0.12, 0.26), darkBlue,  0.30, 0.06,  0.50);
+  mesh(new THREE.BoxGeometry(0.22, 0.12, 0.26), darkBlue, -0.30, 0.06, -0.50);
+  mesh(new THREE.BoxGeometry(0.22, 0.12, 0.26), darkBlue,  0.30, 0.06, -0.50);
+  // Legs
+  mesh(new THREE.BoxGeometry(0.20, 0.55, 0.20), blue, -0.30, 0.395,  0.50);
+  mesh(new THREE.BoxGeometry(0.20, 0.55, 0.20), blue,  0.30, 0.395,  0.50);
+  mesh(new THREE.BoxGeometry(0.20, 0.55, 0.20), blue, -0.30, 0.395, -0.50);
+  mesh(new THREE.BoxGeometry(0.20, 0.55, 0.20), blue,  0.30, 0.395, -0.50);
+  // Body
+  mesh(new THREE.BoxGeometry(0.85, 0.58, 1.40), blue, 0, 0.95, 0);
+  // Neck
+  mesh(new THREE.BoxGeometry(0.36, 0.42, 0.36), blue, 0, 1.38, 0.58);
+  // Head
+  mesh(new THREE.BoxGeometry(0.52, 0.48, 0.50), blue, 0, 1.58, 0.82);
+  // Snout
+  mesh(new THREE.BoxGeometry(0.30, 0.22, 0.32), darkBlue, 0, 1.46, 1.06);
+  // Ears
+  mesh(new THREE.ConeGeometry(0.10, 0.22, 4), blue, -0.18, 1.90, 0.80);
+  mesh(new THREE.ConeGeometry(0.10, 0.22, 4), blue,  0.18, 1.90, 0.80);
+  // Eyes (red glow)
+  mesh(new THREE.SphereGeometry(0.065, 8, 6), eyeMat, -0.15, 1.60, 1.04);
+  mesh(new THREE.SphereGeometry(0.065, 8, 6), eyeMat,  0.15, 1.60, 1.04);
+  // Tail (angled upward at the back)
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.04, 0.65, 8), blue);
+  tail.position.set(0, 1.10, -0.82);
+  tail.rotation.x = -Math.PI / 5;
+  g.add(tail);
+
+  g.scale.set(1.35, 1.35, 1.35);
+  return g;
+}
+
 // ─── Maze builder ─────────────────────────────────────────────────────────────
 let maze     = null;
 let CELL_SIZE = 4;
 
+let mazeSceneObjects = [];   // tracked for cleanup on restart
+
 function buildMaze(mazeGrid, cs) {
+  // Remove any previously built maze geometry
+  mazeSceneObjects.forEach(o => scene.remove(o));
+  mazeSceneObjects = [];
+
   CELL_SIZE = cs;
   const G   = mazeGrid.length;
   const cx  = (G - 1) * cs / 2;
   const cz  = (G - 1) * cs / 2;
   const tw  = G * cs;
+  const wt  = cs * WALL_THICK_RATIO;   // actual wall thickness
 
   // Floor
   const floor = new THREE.Mesh(new THREE.PlaneGeometry(tw, tw), floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(cx, 0, cz);
   scene.add(floor);
+  mazeSceneObjects.push(floor);
 
   // Ceiling
   const ceil = new THREE.Mesh(new THREE.PlaneGeometry(tw, tw), ceilMat);
   ceil.rotation.x = Math.PI / 2;
   ceil.position.set(cx, WALL_HEIGHT, cz);
   scene.add(ceil);
+  mazeSceneObjects.push(ceil);
 
-  // Walls via InstancedMesh
-  let wallCount = 0;
-  for (let r = 0; r < G; r++)
-    for (let c = 0; c < G; c++)
-      if (mazeGrid[r][c] === 1) wallCount++;
-
-  const wallGeo  = new THREE.BoxGeometry(cs, WALL_HEIGHT, cs);
-  const wallInst = new THREE.InstancedMesh(wallGeo, wallMat, wallCount);
-  const dummy    = new THREE.Object3D();
-  let idx = 0;
+  // Count each wall type
+  let hCount = 0, vCount = 0, pCount = 0;
   for (let r = 0; r < G; r++) {
     for (let c = 0; c < G; c++) {
       if (mazeGrid[r][c] === 1) {
-        dummy.position.set(c * cs, WALL_HEIGHT / 2, r * cs);
-        dummy.updateMatrix();
-        wallInst.setMatrixAt(idx++, dummy.matrix);
+        const rEven = (r % 2 === 0), cEven = (c % 2 === 0);
+        if (rEven && cEven)  pCount++;   // corner pillar
+        else if (rEven)      hCount++;   // horizontal slab (thin in Z)
+        else                 vCount++;   // vertical slab   (thin in X)
       }
     }
   }
-  wallInst.instanceMatrix.needsUpdate = true;
-  scene.add(wallInst);
+
+  const dummy = new THREE.Object3D();
+
+  // Horizontal slabs: r even, c odd → thin in Z, full in X
+  if (hCount > 0) {
+    const hInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(cs, WALL_HEIGHT, wt), wallMat, hCount);
+    let hi = 0;
+    for (let r = 0; r < G; r++) {
+      for (let c = 0; c < G; c++) {
+        if (mazeGrid[r][c] === 1 && r % 2 === 0 && c % 2 !== 0) {
+          dummy.position.set(c * cs, WALL_HEIGHT / 2, r * cs);
+          dummy.updateMatrix();
+          hInst.setMatrixAt(hi++, dummy.matrix);
+        }
+      }
+    }
+    hInst.instanceMatrix.needsUpdate = true;
+    scene.add(hInst);
+    mazeSceneObjects.push(hInst);
+  }
+
+  // Vertical slabs: r odd, c even → full in Z, thin in X
+  if (vCount > 0) {
+    const vInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(wt, WALL_HEIGHT, cs), wallMat, vCount);
+    let vi = 0;
+    for (let r = 0; r < G; r++) {
+      for (let c = 0; c < G; c++) {
+        if (mazeGrid[r][c] === 1 && r % 2 !== 0 && c % 2 === 0) {
+          dummy.position.set(c * cs, WALL_HEIGHT / 2, r * cs);
+          dummy.updateMatrix();
+          vInst.setMatrixAt(vi++, dummy.matrix);
+        }
+      }
+    }
+    vInst.instanceMatrix.needsUpdate = true;
+    scene.add(vInst);
+    mazeSceneObjects.push(vInst);
+  }
+
+  // Corner pillars: r even, c even → thin in both X and Z
+  if (pCount > 0) {
+    const pInst = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(wt, WALL_HEIGHT, wt), wallMat, pCount);
+    let pi = 0;
+    for (let r = 0; r < G; r++) {
+      for (let c = 0; c < G; c++) {
+        if (mazeGrid[r][c] === 1 && r % 2 === 0 && c % 2 === 0) {
+          dummy.position.set(c * cs, WALL_HEIGHT / 2, r * cs);
+          dummy.updateMatrix();
+          pInst.setMatrixAt(pi++, dummy.matrix);
+        }
+      }
+    }
+    pInst.instanceMatrix.needsUpdate = true;
+    scene.add(pInst);
+    mazeSceneObjects.push(pInst);
+  }
 
   // Point lights scattered through corridors for atmosphere
   for (let r = 1; r < G; r += 4) {
@@ -147,6 +256,7 @@ function buildMaze(mazeGrid, cs) {
         const pt = new THREE.PointLight(0x8899FF, 1.3, 18);
         pt.position.set(c * cs, WALL_HEIGHT - 0.3, r * cs);
         scene.add(pt);
+        mazeSceneObjects.push(pt);
       }
     }
   }
@@ -210,6 +320,7 @@ function checkBoltHit(pos) {
 // ─── Remote players ───────────────────────────────────────────────────────────
 const otherPlayers = {};   // socketId → { model, slot }
 const otherHealth  = {};   // slot → number
+let   wolfMesh     = null; // the roaming monster
 
 function addRemotePlayer(p) {
   const model = makeSuit(SUIT_COLOR[p.slot]);
@@ -267,6 +378,7 @@ let lastMoveSent = 0;
 function shoot() {
   if (isDead || !maze || !canShoot || gameEnded) return;
   canShoot = false;
+  playPewSound();
 
   // Muzzle just below eye level
   const origin = camera.position.clone();
@@ -348,16 +460,13 @@ function buildMinimapStatic() {
 function drawMinimapAstronaut(ctx, x, y, plyYaw, color) {
   ctx.save();
   ctx.translate(x, y);
-  // canvas rotation = -yaw (world yaw=0 faces -Z = "up" on top-down canvas)
-  ctx.rotate(-plyYaw);
 
-  // Helmet (white)
+  // Astronaut body – always drawn upright (never flipped)
   ctx.fillStyle = '#dddddd';
   ctx.beginPath();
   ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
   ctx.fill();
 
-  // Visor (tinted with player color)
   ctx.fillStyle = color;
   ctx.globalAlpha = 0.7;
   ctx.beginPath();
@@ -365,18 +474,28 @@ function drawMinimapAstronaut(ctx, x, y, plyYaw, color) {
   ctx.fill();
   ctx.globalAlpha = 1.0;
 
-  // Torso
   ctx.fillStyle = color;
   ctx.fillRect(-2.5, -2.5, 5, 4);
-
-  // Backpack (light grey, on the back side)
   ctx.fillStyle = '#aaaaaa';
   ctx.fillRect(-2.5, -2, 1.2, 2);
-
-  // Legs
   ctx.fillStyle = color;
   ctx.fillRect(-2, 1.5, 1.8, 2.8);
   ctx.fillRect(0.2, 1.5, 1.8, 2.8);
+
+  // Direction arrow snapped to nearest 90° (canvas rotation = -yaw)
+  const snappedAngle = Math.round(-plyYaw / (Math.PI / 2)) * (Math.PI / 2);
+  ctx.save();
+  ctx.rotate(snappedAngle);
+  ctx.fillStyle = '#ffffff';
+  ctx.globalAlpha = 0.88;
+  ctx.beginPath();
+  ctx.moveTo(0, -9.5);
+  ctx.lineTo(-2.5, -6.5);
+  ctx.lineTo(2.5, -6.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.globalAlpha = 1.0;
+  ctx.restore();
 
   ctx.restore();
 }
@@ -421,6 +540,25 @@ function drawMinimap() {
     const [px, pz] = toCanvas(op.model.position.x, op.model.position.z);
     drawMinimapAstronaut(ctx, px, pz, op.model.rotation.y,
                          op.slot === 0 ? '#FFD700' : '#4499FF');
+  }
+
+  // Wolf monster
+  if (wolfMesh) {
+    const [wx, wz] = toCanvas(wolfMesh.position.x, wolfMesh.position.z);
+    ctx.save();
+    ctx.fillStyle = '#4499FF';
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath();
+    ctx.arc(wx, wz, 5.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.globalAlpha = 1.0;
+    ctx.font = 'bold 7px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('W', wx, wz);
+    ctx.textAlign = 'left';
+    ctx.restore();
   }
 
   // My player
@@ -491,6 +629,68 @@ function updateLives() {
   }
 }
 
+// ─── System chat log ──────────────────────────────────────────────────────────
+function addSystemLog(text) {
+  const chatLog = document.getElementById('chatLog');
+  if (!chatLog) return;
+  const div = document.createElement('div');
+  div.style.color = 'rgba(190,190,190,0.65)';
+  div.style.fontStyle = 'italic';
+  div.textContent = '* ' + text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function playerColorName(socketId) {
+  if (socketId === 'monster') return 'The wolf';
+  if (socketId === socket.id) return (mySlot === 0 ? 'Yellow' : 'Blue');
+  const op = otherPlayers[socketId];
+  return op ? (op.slot === 0 ? 'Yellow' : 'Blue') : 'Unknown';
+}
+
+// ─── Audio ────────────────────────────────────────────────────────────────────
+let audioCtx = null;
+
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playPewSound() {
+  try {
+    const ctx  = getAudioCtx();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const lfo  = ctx.createOscillator();
+    const lfoG = ctx.createGain();
+
+    // LFO for doppler-like frequency modulation
+    lfo.type = 'sine';
+    lfo.frequency.value = 14;
+    lfoG.gain.value = 35;
+    lfo.connect(lfoG);
+    lfoG.connect(osc.frequency);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    const t = ctx.currentTime;
+    osc.type = 'sawtooth';
+    // Frequency sweep: 880 Hz → 140 Hz (drawn-out doppler drop)
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.exponentialRampToValueAtTime(140, t + 0.55);
+
+    gain.gain.setValueAtTime(0.001, t);
+    gain.gain.linearRampToValueAtTime(0.22, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.58);
+
+    lfo.start(t);
+    osc.start(t);
+    lfo.stop(t + 0.58);
+    osc.stop(t + 0.58);
+  } catch (e) { /* audio unavailable */ }
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 function sendChat() {
   const chatInput = document.getElementById('chatInput');
@@ -530,13 +730,21 @@ socket.on('gameFull', () => {
   if (sub) sub.textContent = '⛔ Game is full — try again later.';
 });
 
-socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
+socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players, monster: monsterData }) => {
   mySlot    = slot;
   maze      = mazeData;
   CELL_SIZE = cellSize;
 
   buildMaze(maze, CELL_SIZE);
   buildMinimapStatic();
+
+  // Set up wolf
+  if (monsterData) {
+    wolfMesh = makeWolf();
+    wolfMesh.position.set(monsterData.position.x, 0, monsterData.position.z);
+    wolfMesh.rotation.y = monsterData.angle;
+    scene.add(wolfMesh);
+  }
 
   players.forEach(p => {
     if (p.id === myId) {
@@ -583,6 +791,7 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
 socket.on('playerJoined', (p) => {
   if (p.id !== socket.id) {
     addRemotePlayer(p);
+    addSystemLog((p.slot === 0 ? 'Yellow' : 'Blue') + ' has entered the arena');
     const st = document.getElementById('statusMsg');
     if (st) st.textContent = '⚠️  Enemy astronaut detected!';
   }
@@ -614,6 +823,10 @@ socket.on('playerHit', ({ targetId, health }) => {
 });
 
 socket.on('playerKilled', ({ targetId, killerId, lives }) => {
+  const targetName = playerColorName(targetId);
+  const killerName = playerColorName(killerId);
+  addSystemLog(killerName + ' killed ' + targetName);
+
   if (targetId === socket.id) {
     myLives  = lives;
     isDead   = true;
@@ -637,6 +850,8 @@ socket.on('playerKilled', ({ targetId, killerId, lives }) => {
 socket.on('gameOver', ({ loserId, winnerId }) => {
   gameEnded = true;
   canShoot  = false;
+  const winnerName = playerColorName(winnerId);
+  addSystemLog(winnerName + ' wins! Restarting in 5 s…');
   const el = document.getElementById('gameOverMsg');
   if (el) {
     el.textContent = (winnerId === socket.id) ? '🏆 VICTORY!' : '💀 DEFEATED!';
@@ -677,9 +892,59 @@ socket.on('playerRespawned', ({ id, position }) => {
 
 socket.on('playerLeft', (id) => {
   const op = otherPlayers[id];
-  if (op) { scene.remove(op.model); delete otherPlayers[id]; }
+  if (op) {
+    addSystemLog((op.slot === 0 ? 'Yellow' : 'Blue') + ' has left');
+    scene.remove(op.model);
+    delete otherPlayers[id];
+  }
   const st = document.getElementById('statusMsg');
   if (st) st.textContent = '👤 Waiting for opponent…';
+});
+
+socket.on('monsterMoved', ({ position, angle }) => {
+  if (wolfMesh) {
+    wolfMesh.position.set(position.x, 0, position.z);
+    wolfMesh.rotation.y = angle;
+  }
+});
+
+socket.on('gameRestart', ({ maze: newMaze, players: restartPlayers }) => {
+  maze      = newMaze;
+  gameEnded = false;
+  isDead    = false;
+  canShoot  = true;
+  myHealth  = 100;
+  myLives   = 3;
+
+  buildMaze(maze, CELL_SIZE);
+  buildMinimapStatic();
+
+  // Rebuild wolf
+  if (wolfMesh) { scene.remove(wolfMesh); wolfMesh = null; }
+  wolfMesh = makeWolf();
+  const midCell = Math.floor(maze.length / 2);
+  wolfMesh.position.set(midCell * CELL_SIZE, 0, midCell * CELL_SIZE);
+  scene.add(wolfMesh);
+
+  restartPlayers.forEach(p => {
+    if (p.id === socket.id) {
+      myPos.set(p.position.x, p.position.y, p.position.z);
+      camera.position.set(myPos.x, myPos.y + EYE_HEIGHT, myPos.z);
+    } else {
+      const op = otherPlayers[p.id];
+      if (op) {
+        op.model.position.set(p.position.x, p.position.y + 1.0, p.position.z);
+        otherHealth[op.slot] = 100;
+      }
+    }
+  });
+
+  Object.keys(otherLivesCount).forEach(s => { otherLivesCount[Number(s)] = 3; });
+  const gameOverEl = document.getElementById('gameOverMsg');
+  if (gameOverEl) gameOverEl.style.display = 'none';
+  addSystemLog('New round started!');
+  updateHUD();
+  updateLives();
 });
 
 // ─── Game loop ────────────────────────────────────────────────────────────────
