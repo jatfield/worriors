@@ -77,11 +77,15 @@ function mazeHitsWall(wx, wz, radius) {
 }
 
 // Monster starts near maze centre (grid cell MAZE_ROOMS, MAZE_ROOMS)
+const MONSTER_START = { x: CELL_SIZE * MAZE_ROOMS, y: 0, z: CELL_SIZE * MAZE_ROOMS };
+
 const monster = {
-  position:     { x: CELL_SIZE * MAZE_ROOMS, y: 0, z: CELL_SIZE * MAZE_ROOMS },
+  position:     { ...MONSTER_START },
   dir:          { x: 1, z: 0 },
   angle:        0,
   lastKillTime: 0,
+  health:       100,
+  dead:         false,
 };
 
 // ─── Game restart ─────────────────────────────────────────────────────────────
@@ -95,10 +99,12 @@ function scheduleRestart() {
       p.lives    = 3;
       p.position = { ...START_POSITIONS[p.slot] };
     }
-    monster.position     = { x: CELL_SIZE * MAZE_ROOMS, y: 0, z: CELL_SIZE * MAZE_ROOMS };
+    monster.position     = { ...MONSTER_START };
     monster.dir          = { x: 1, z: 0 };
     monster.angle        = 0;
     monster.lastKillTime = 0;
+    monster.health       = 100;
+    monster.dead         = false;
     io.emit('gameRestart', { maze, players: Object.values(players) });
   }, 5000);
 }
@@ -107,7 +113,7 @@ function scheduleRestart() {
 let lastMonsterTick = Date.now();
 
 setInterval(() => {
-  if (gameOver) return;
+  if (gameOver || monster.dead) return;
 
   const now = Date.now();
   const dt  = Math.min((now - lastMonsterTick) / 1000, 0.1);
@@ -247,6 +253,24 @@ io.on('connection', (socket) => {
         io.emit('gameOver', { loserId: targetId, winnerId: socket.id });
         scheduleRestart();
       }
+    }
+  });
+
+  // ── Wolf hit (shooter-authoritative) ──────────────────────────────────────
+  socket.on('hitWolf', () => {
+    if (monster.dead || gameOver) return;
+    monster.health = Math.max(0, monster.health - 25);
+    if (monster.health <= 0) {
+      monster.dead = true;
+      io.emit('wolfKilled');
+      setTimeout(() => {
+        monster.health   = 100;
+        monster.dead     = false;
+        monster.position = { ...MONSTER_START };
+        monster.dir      = { x: 1, z: 0 };
+        monster.angle    = 0;
+        io.emit('wolfRespawned', { position: monster.position });
+      }, 5000);
     }
   });
 
