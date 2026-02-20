@@ -10,7 +10,10 @@ const BOLT_SPEED     = 22;    // world units per second
 const BOLT_MAX_DIST  = 50;    // max travel distance before despawn
 const BOLT_COLOR     = 0xFF2200;  // Star Wars-style bright red
 const MOVE_EMIT_HZ   = 50;   // ms between position broadcasts
-const WALL_THICK_RATIO = 0.35; // wall width as fraction of CELL_SIZE
+const WALL_THICK_RATIO = 0.15; // wall width as fraction of CELL_SIZE
+
+const WOLF_HIT_RADIUS    = 1.2;   // bolt hit detection radius for the wolf
+const WOLF_CENTER_OFFSET = 1.0;   // vertical centre offset for wolf hit box
 
 // Index 0 = yellow player, 1 = blue player
 const SUIT_COLOR  = [0xFFCC00, 0x1166EE];
@@ -192,10 +195,10 @@ function buildMaze(mazeGrid, cs) {
 
   const dummy = new THREE.Object3D();
 
-  // Horizontal slabs: r even, c odd → thin in Z, full in X
+  // Horizontal slabs: r even, c odd → thin in Z, spanning two cells in X
   if (hCount > 0) {
     const hInst = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(cs, WALL_HEIGHT, wt), wallMat, hCount);
+      new THREE.BoxGeometry(2 * cs, WALL_HEIGHT, wt), wallMat, hCount);
     let hi = 0;
     for (let r = 0; r < G; r++) {
       for (let c = 0; c < G; c++) {
@@ -214,7 +217,7 @@ function buildMaze(mazeGrid, cs) {
   // Vertical slabs: r odd, c even → full in Z, thin in X
   if (vCount > 0) {
     const vInst = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(wt, WALL_HEIGHT, cs), wallMat, vCount);
+      new THREE.BoxGeometry(wt, WALL_HEIGHT, 2 * cs), wallMat, vCount);
     let vi = 0;
     for (let r = 0; r < G; r++) {
       for (let c = 0; c < G; c++) {
@@ -309,6 +312,12 @@ function removeBolt(i) {
 }
 
 function checkBoltHit(pos) {
+  // Check wolf
+  if (wolfMesh && wolfMesh.visible && !wolfDead) {
+    const wolfCenter = wolfMesh.position.clone();
+    wolfCenter.y += WOLF_CENTER_OFFSET;
+    if (pos.distanceTo(wolfCenter) < WOLF_HIT_RADIUS) return 'wolf';
+  }
   for (const [id, op] of Object.entries(otherPlayers)) {
     const center = op.model.position.clone();
     center.y += 0.45;
@@ -321,6 +330,7 @@ function checkBoltHit(pos) {
 const otherPlayers = {};   // socketId → { model, slot }
 const otherHealth  = {};   // slot → number
 let   wolfMesh     = null; // the roaming monster
+let   wolfDead     = false;
 
 function addRemotePlayer(p) {
   const model = makeSuit(SUIT_COLOR[p.slot]);
@@ -446,11 +456,26 @@ function buildMinimapStatic() {
   ctx.fillStyle = '#06060f';
   ctx.fillRect(0, 0, W, W);
 
+  const wt_px = WALL_THICK_RATIO * cellPx;
   ctx.fillStyle = '#1e2d3d';
   for (let r = 0; r < G; r++) {
     for (let c = 0; c < G; c++) {
       if (maze[r][c] === 1) {
-        ctx.fillRect(c * cellPx, r * cellPx, cellPx, cellPx);
+        const cx = c * cellPx;
+        const cz = r * cellPx;
+        const rEven = (r % 2 === 0), cEven = (c % 2 === 0);
+        let wx, wz, ww, wh;
+        if (rEven && cEven) {           // corner pillar
+          ww = wt_px; wh = wt_px;
+          wx = cx - wt_px / 2; wz = cz - wt_px / 2;
+        } else if (rEven) {             // horizontal slab (thin Z, spans 2 cells in X)
+          ww = 2 * cellPx; wh = wt_px;
+          wx = cx - cellPx; wz = cz - wt_px / 2;
+        } else {                        // vertical slab (thin X, spans 2 cells in Z)
+          ww = wt_px; wh = 2 * cellPx;
+          wx = cx - wt_px / 2; wz = cz - cellPx;
+        }
+        ctx.fillRect(wx, wz, ww, wh);
       }
     }
   }
@@ -908,6 +933,21 @@ socket.on('monsterMoved', ({ position, angle }) => {
   }
 });
 
+socket.on('wolfKilled', () => {
+  wolfDead = true;
+  if (wolfMesh) wolfMesh.visible = false;
+  addSystemLog('The wolf was slain! It will respawn shortly…');
+});
+
+socket.on('wolfRespawned', ({ position }) => {
+  wolfDead = false;
+  if (wolfMesh) {
+    wolfMesh.position.set(position.x, 0, position.z);
+    wolfMesh.visible = true;
+  }
+  addSystemLog('The wolf has respawned!');
+});
+
 socket.on('gameRestart', ({ maze: newMaze, players: restartPlayers }) => {
   maze      = newMaze;
   gameEnded = false;
@@ -915,6 +955,7 @@ socket.on('gameRestart', ({ maze: newMaze, players: restartPlayers }) => {
   canShoot  = true;
   myHealth  = 100;
   myLives   = 3;
+  wolfDead  = false;
 
   buildMaze(maze, CELL_SIZE);
   buildMinimapStatic();
@@ -1004,7 +1045,10 @@ function animate() {
               (bolt.pos.y >= 0 && bolt.pos.y <= WALL_HEIGHT && isWallAt(bolt.pos.x, bolt.pos.z));
     if (!hit && bolt.isLocal) {
       const hitId = checkBoltHit(bolt.pos);
-      if (hitId) {
+      if (hitId === 'wolf') {
+        socket.emit('hitWolf');
+        hit = true;
+      } else if (hitId) {
         socket.emit('hit', { targetId: hitId });
         hit = true;
       }
