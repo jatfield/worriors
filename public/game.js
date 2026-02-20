@@ -6,13 +6,13 @@ const WALL_HEIGHT    = 3.2;
 const EYE_HEIGHT     = 1.62;
 const MOVE_SPEED     = 5.2;
 const COLLIDE_R      = 0.38;
-const LASER_LIFE_MS  = 220;
-const SHOOT_CD_MS    = 420;
+const BOLT_SPEED     = 22;    // world units per second
+const BOLT_MAX_DIST  = 50;    // max travel distance before despawn
+const BOLT_COLOR     = 0xFF2200;  // Star Wars-style bright red
 const MOVE_EMIT_HZ   = 50;   // ms between position broadcasts
 
 // Index 0 = yellow player, 1 = blue player
 const SUIT_COLOR  = [0xFFCC00, 0x1166EE];
-const LASER_COLOR = [0xFF3300, 0x00CCFF];
 
 // ─── Three.js scene ───────────────────────────────────────────────────────────
 const scene    = new THREE.Scene();
@@ -166,36 +166,45 @@ function hitsWall(wx, wz, radius) {
          isWallAt(wx, wz + radius) || isWallAt(wx, wz - radius);
 }
 
-// ─── Laser helpers ────────────────────────────────────────────────────────────
-const lasers = [];
+// ─── Bolt helpers ─────────────────────────────────────────────────────────────
+const bolts = [];
+let canShoot = true;
 
-function laserEnd(origin, dir) {
-  const step = 0.3;
-  const max  = 50;
-  const p    = origin.clone();
-  for (let d = step; d < max; d += step) {
-    p.addScaledVector(dir, step);
-    if (p.y >= 0 && p.y <= WALL_HEIGHT && isWallAt(p.x, p.z)) return p.clone();
-  }
-  return origin.clone().addScaledVector(dir, max);
+function spawnBolt(origin, dir, isLocal) {
+  const normDir = dir.clone().normalize();
+
+  // Elongated bolt capsule oriented along travel direction
+  const boltMat = new THREE.MeshBasicMaterial({ color: BOLT_COLOR });
+  const boltGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.42, 8);
+  const boltMesh = new THREE.Mesh(boltGeo, boltMat);
+  boltMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normDir);
+  boltMesh.position.copy(origin);
+  scene.add(boltMesh);
+
+  // Soft glow sphere around the bolt
+  const glowMat = new THREE.MeshBasicMaterial({ color: 0xFF6633, transparent: true, opacity: 0.35 });
+  const glowMesh = new THREE.Mesh(new THREE.SphereGeometry(0.10, 8, 6), glowMat);
+  glowMesh.position.copy(origin);
+  scene.add(glowMesh);
+
+  bolts.push({ mesh: boltMesh, glow: glowMesh, pos: origin.clone(), dir: normDir, isLocal, traveled: 0 });
 }
 
-function spawnLaser(origin, dir, colorHex) {
-  const end = laserEnd(origin, dir);
-  const geo = new THREE.BufferGeometry().setFromPoints([origin.clone(), end]);
-  const mat = new THREE.LineBasicMaterial({ color: colorHex });
-  const line = new THREE.Line(geo, mat);
-  scene.add(line);
-  lasers.push({ mesh: line, born: Date.now() });
+function removeBolt(i) {
+  const bolt = bolts[i];
+  scene.remove(bolt.mesh);
+  scene.remove(bolt.glow);
+  bolts.splice(i, 1);
+  if (bolt.isLocal) canShoot = true;
+}
 
-  // Muzzle glow
-  const glow = new THREE.Mesh(
-    new THREE.SphereGeometry(0.07, 6, 6),
-    new THREE.MeshBasicMaterial({ color: colorHex })
-  );
-  glow.position.copy(origin);
-  scene.add(glow);
-  lasers.push({ mesh: glow, born: Date.now() });
+function checkBoltHit(pos) {
+  for (const [id, op] of Object.entries(otherPlayers)) {
+    const center = op.model.position.clone();
+    center.y += 0.45;
+    if (pos.distanceTo(center) < 0.6) return id;
+  }
+  return null;
 }
 
 // ─── Remote players ───────────────────────────────────────────────────────────
@@ -208,21 +217,9 @@ function addRemotePlayer(p) {
   scene.add(model);
   otherPlayers[p.id] = { model, slot: p.slot };
   otherHealth[p.slot] = p.health !== undefined ? p.health : 100;
+  otherLivesCount[p.slot] = p.lives !== undefined ? p.lives : 3;
   updateHUD();
-}
-
-// ─── Hit detection (sphere sweep against remote player bounding cylinder) ─────
-function checkHit(origin, dir) {
-  for (const [id, op] of Object.entries(otherPlayers)) {
-    const centre = op.model.position.clone();
-    centre.y += 0.45;        // aim centre of torso
-    const toTarget = centre.clone().sub(origin);
-    const t = toTarget.dot(dir);
-    if (t < 0.1 || t > 40) continue;
-    const closest = origin.clone().addScaledVector(dir, t);
-    if (closest.distanceTo(centre) < 0.58) return id;
-  }
-  return null;
+  updateLives();
 }
 
 // ─── HUD helpers ──────────────────────────────────────────────────────────────
@@ -255,21 +252,21 @@ function flashDamage() {
 // ─── Player state ─────────────────────────────────────────────────────────────
 let mySlot   = -1;
 let myHealth = 100;
+let myLives  = 3;
 let isDead   = false;
+let gameEnded = false;
 const myPos  = new THREE.Vector3();
 let yaw      = 0;
 let pitch    = 0;
 
-const keys       = {};
-let lastShot     = 0;
+const keys          = {};
+const otherLivesCount = {};   // slot → lives remaining
 let lastMoveSent = 0;
 
 // ─── Shooting ────────────────────────────────────────────────────────────────
 function shoot() {
-  if (isDead || !maze) return;
-  const now = Date.now();
-  if (now - lastShot < SHOOT_CD_MS) return;
-  lastShot = now;
+  if (isDead || !maze || !canShoot || gameEnded) return;
+  canShoot = false;
 
   // Muzzle just below eye level
   const origin = camera.position.clone();
@@ -279,15 +276,14 @@ function shoot() {
     .applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'))
     .normalize();
 
-  spawnLaser(origin, dir, LASER_COLOR[mySlot]);
+  spawnBolt(origin, dir, true);
   socket.emit('shoot', { origin: origin.toArray(), direction: dir.toArray() });
-
-  const hitId = checkHit(origin, dir);
-  if (hitId) socket.emit('hit', { targetId: hitId });
 }
 
 // ─── Pointer lock ─────────────────────────────────────────────────────────────
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
+  const chatPanel = document.getElementById('chatPanel');
+  if (chatPanel && chatPanel.contains(e.target)) return;
   if (maze && !document.pointerLockElement) {
     renderer.domElement.requestPointerLock();
   }
@@ -310,8 +306,220 @@ document.addEventListener('mousedown', (e) => {
   if (document.pointerLockElement === renderer.domElement && e.button === 0) shoot();
 });
 
-document.addEventListener('keydown', (e) => { keys[e.code] = true; });
+document.addEventListener('keydown', (e) => {
+  const chatInput = document.getElementById('chatInput');
+  if (document.activeElement === chatInput) return;
+  if (e.code === 'KeyT' && !e.repeat && maze) {
+    e.preventDefault();
+    if (document.pointerLockElement) document.exitPointerLock();
+    if (chatInput) chatInput.focus();
+    return;
+  }
+  keys[e.code] = true;
+});
 document.addEventListener('keyup',   (e) => { keys[e.code] = false; });
+
+// ─── Minimap ──────────────────────────────────────────────────────────────────
+let minimapStaticCanvas = null;   // cached static maze layer
+
+function buildMinimapStatic() {
+  const G = maze.length;
+  const W = 180;
+  const cellPx = W / G;
+  const cvs = document.createElement('canvas');
+  cvs.width  = W;
+  cvs.height = W;
+  const ctx = cvs.getContext('2d');
+
+  ctx.fillStyle = '#06060f';
+  ctx.fillRect(0, 0, W, W);
+
+  ctx.fillStyle = '#1e2d3d';
+  for (let r = 0; r < G; r++) {
+    for (let c = 0; c < G; c++) {
+      if (maze[r][c] === 1) {
+        ctx.fillRect(c * cellPx, r * cellPx, cellPx, cellPx);
+      }
+    }
+  }
+  minimapStaticCanvas = cvs;
+}
+
+function drawMinimapAstronaut(ctx, x, y, plyYaw, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  // canvas rotation = -yaw (world yaw=0 faces -Z = "up" on top-down canvas)
+  ctx.rotate(-plyYaw);
+
+  // Helmet (white)
+  ctx.fillStyle = '#dddddd';
+  ctx.beginPath();
+  ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Visor (tinted with player color)
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.arc(0.5, -5, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1.0;
+
+  // Torso
+  ctx.fillStyle = color;
+  ctx.fillRect(-2.5, -2.5, 5, 4);
+
+  // Backpack (light grey, on the back side)
+  ctx.fillStyle = '#aaaaaa';
+  ctx.fillRect(-2.5, -2, 1.2, 2);
+
+  // Legs
+  ctx.fillStyle = color;
+  ctx.fillRect(-2, 1.5, 1.8, 2.8);
+  ctx.fillRect(0.2, 1.5, 1.8, 2.8);
+
+  ctx.restore();
+}
+
+function drawMinimap() {
+  if (!maze) return;
+  const canvas = document.getElementById('minimapCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const G = maze.length;
+  const cellPx = W / G;
+
+  // Blit cached static maze layer
+  if (minimapStaticCanvas) {
+    ctx.drawImage(minimapStaticCanvas, 0, 0);
+  } else {
+    ctx.fillStyle = '#06060f';
+    ctx.fillRect(0, 0, W, W);
+  }
+
+  // World position → canvas position
+  function toCanvas(wx, wz) {
+    return [wx / CELL_SIZE * cellPx, wz / CELL_SIZE * cellPx];
+  }
+
+  // Bolts
+  bolts.forEach(bolt => {
+    const [bx, by] = toCanvas(bolt.pos.x, bolt.pos.z);
+    ctx.fillStyle = 'rgba(255,80,0,0.45)';
+    ctx.beginPath();
+    ctx.arc(bx, by, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FF2200';
+    ctx.beginPath();
+    ctx.arc(bx, by, 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Remote players
+  for (const op of Object.values(otherPlayers)) {
+    const [px, pz] = toCanvas(op.model.position.x, op.model.position.z);
+    drawMinimapAstronaut(ctx, px, pz, op.model.rotation.y,
+                         op.slot === 0 ? '#FFD700' : '#4499FF');
+  }
+
+  // My player
+  if (mySlot >= 0) {
+    const [mx, mz] = toCanvas(myPos.x, myPos.z);
+    drawMinimapAstronaut(ctx, mx, mz, yaw, mySlot === 0 ? '#FFD700' : '#4499FF');
+  }
+}
+
+// ─── Lives display ────────────────────────────────────────────────────────────
+function drawLifeIcon(ctx, x, y, color, alive) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.globalAlpha = alive ? 1.0 : 0.18;
+
+  // Helmet
+  ctx.fillStyle = '#dddddd';
+  ctx.beginPath();
+  ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Visor
+  ctx.fillStyle = color;
+  ctx.globalAlpha = alive ? 0.7 : 0.18;
+  ctx.beginPath();
+  ctx.arc(0.5, -5, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = alive ? 1.0 : 0.18;
+
+  // Body
+  ctx.fillStyle = color;
+  ctx.fillRect(-2.5, -2.5, 5, 4);
+
+  // Legs
+  ctx.fillRect(-2, 1.5, 1.8, 2.8);
+  ctx.fillRect(0.2, 1.5, 1.8, 2.8);
+
+  ctx.restore();
+}
+
+function updateLives() {
+  const canvas = document.getElementById('livesCanvas');
+  if (!canvas || mySlot < 0) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const myColor = mySlot === 0 ? '#FFD700' : '#4499FF';
+
+  // Row 1 – my lives (centred at y=14)
+  ctx.fillStyle = 'rgba(255,255,255,0.38)';
+  ctx.font = '7px Courier New';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('YOU', 1, 14);
+  for (let i = 0; i < 3; i++) {
+    drawLifeIcon(ctx, 30 + i * 22, 14, myColor, i < myLives);
+  }
+
+  // Row 2 – enemy lives (centred at y=34)
+  const enemyOp = Object.values(otherPlayers)[0];
+  if (enemyOp) {
+    const enemyColor = enemyOp.slot === 0 ? '#FFD700' : '#4499FF';
+    const eL = otherLivesCount[enemyOp.slot] !== undefined ? otherLivesCount[enemyOp.slot] : 3;
+    ctx.fillStyle = 'rgba(255,255,255,0.38)';
+    ctx.fillText('FOE', 1, 34);
+    for (let i = 0; i < 3; i++) {
+      drawLifeIcon(ctx, 30 + i * 22, 34, enemyColor, i < eL);
+    }
+  }
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+function sendChat() {
+  const chatInput = document.getElementById('chatInput');
+  if (!chatInput) return;
+  const text = chatInput.value.trim();
+  if (!text || !maze) return;
+  socket.emit('chat', text);
+  chatInput.value = '';
+  chatInput.blur();
+  if (maze) renderer.domElement.requestPointerLock();
+}
+
+(function initChat() {
+  const chatInput  = document.getElementById('chatInput');
+  const chatSendBtn = document.getElementById('chatSend');
+  if (chatInput) {
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.code === 'Enter') {
+        e.stopPropagation();
+        sendChat();
+      } else if (e.code === 'Escape') {
+        e.stopPropagation();
+        chatInput.blur();
+        if (maze) renderer.domElement.requestPointerLock();
+      }
+    });
+  }
+  if (chatSendBtn) chatSendBtn.addEventListener('click', sendChat);
+}());
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
 /* global io */
@@ -328,10 +536,12 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   CELL_SIZE = cellSize;
 
   buildMaze(maze, CELL_SIZE);
+  buildMinimapStatic();
 
   players.forEach(p => {
     if (p.id === myId) {
       myPos.set(p.position.x, p.position.y, p.position.z);
+      myLives = p.lives !== undefined ? p.lives : 3;
     } else {
       addRemotePlayer(p);
     }
@@ -345,6 +555,11 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   document.getElementById('waiting').style.display = 'none';
   document.getElementById('gameUI').style.display  = 'block';
 
+  const chatPanel = document.getElementById('chatPanel');
+  if (chatPanel) chatPanel.style.display = 'block';
+  const chatHint = document.getElementById('chatHint');
+  if (chatHint) chatHint.style.display = 'none';
+
   const lbl = document.getElementById('myColorLabel');
   if (lbl) {
     lbl.textContent = slot === 0 ? '🟡 YELLOW' : '🔵 BLUE';
@@ -354,7 +569,15 @@ socket.on('init', ({ myId, slot, maze: mazeData, cellSize, players }) => {
   if (myLbl) {
     myLbl.style.color = slot === 0 ? '#FFD700' : '#4499FF';
   }
+
+  // If an opponent is already in the game, update the status message
+  const st = document.getElementById('statusMsg');
+  if (st && players.length > 1) {
+    st.textContent = '⚠️  Enemy astronaut detected!';
+  }
+
   updateHUD();
+  updateLives();
 });
 
 socket.on('playerJoined', (p) => {
@@ -376,7 +599,7 @@ socket.on('playerShot', ({ shooterId, slot, origin, direction }) => {
   if (shooterId === socket.id) return;
   const o = new THREE.Vector3(...origin);
   const d = new THREE.Vector3(...direction).normalize();
-  spawnLaser(o, d, LASER_COLOR[slot]);
+  spawnBolt(o, d, false);
 });
 
 socket.on('playerHit', ({ targetId, health }) => {
@@ -390,19 +613,50 @@ socket.on('playerHit', ({ targetId, health }) => {
   }
 });
 
-socket.on('playerKilled', ({ targetId, killerId }) => {
+socket.on('playerKilled', ({ targetId, killerId, lives }) => {
   if (targetId === socket.id) {
+    myLives  = lives;
     isDead   = true;
     myHealth = 0;
     showMsg('deathMsg', 3000);
+    updateLives();
   } else if (killerId === socket.id) {
     showMsg('killMsg', 3000);
   }
   if (targetId !== socket.id) {
     const op = otherPlayers[targetId];
-    if (op) { otherHealth[op.slot] = 0; }
+    if (op) {
+      otherHealth[op.slot] = 0;
+      if (lives !== undefined) otherLivesCount[op.slot] = lives;
+      updateLives();
+    }
   }
   updateHUD();
+});
+
+socket.on('gameOver', ({ loserId, winnerId }) => {
+  gameEnded = true;
+  canShoot  = false;
+  const el = document.getElementById('gameOverMsg');
+  if (el) {
+    el.textContent = (winnerId === socket.id) ? '🏆 VICTORY!' : '💀 DEFEATED!';
+    el.style.display = 'block';
+  }
+});
+
+socket.on('chatMsg', ({ slot, text }) => {
+  const chatLog = document.getElementById('chatLog');
+  if (!chatLog) return;
+  const color = slot === 0 ? '#FFD700' : '#4499FF';
+  const name  = slot === 0 ? 'YELLOW' : 'BLUE';
+  const div   = document.createElement('div');
+  const nameSpan = document.createElement('span');
+  nameSpan.style.color = color;
+  nameSpan.textContent = name;
+  div.appendChild(nameSpan);
+  div.appendChild(document.createTextNode(': ' + text));
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
 });
 
 socket.on('playerRespawned', ({ id, position }) => {
@@ -472,13 +726,28 @@ function animate() {
     lastMoveSent = now;
   }
 
-  // Expire lasers
-  for (let i = lasers.length - 1; i >= 0; i--) {
-    if (now - lasers[i].born > LASER_LIFE_MS) {
-      scene.remove(lasers[i].mesh);
-      lasers.splice(i, 1);
+  // Update bolts – move forward, check collisions
+  for (let i = bolts.length - 1; i >= 0; i--) {
+    const bolt = bolts[i];
+    const dist = BOLT_SPEED * dt;
+    bolt.traveled += dist;
+    bolt.pos.addScaledVector(bolt.dir, dist);
+    bolt.mesh.position.copy(bolt.pos);
+    bolt.glow.position.copy(bolt.pos);
+
+    let hit = bolt.traveled >= BOLT_MAX_DIST ||
+              (bolt.pos.y >= 0 && bolt.pos.y <= WALL_HEIGHT && isWallAt(bolt.pos.x, bolt.pos.z));
+    if (!hit && bolt.isLocal) {
+      const hitId = checkBoltHit(bolt.pos);
+      if (hitId) {
+        socket.emit('hit', { targetId: hitId });
+        hit = true;
+      }
     }
+    if (hit) removeBolt(i);
   }
+
+  drawMinimap();
 
   renderer.render(scene, camera);
 }

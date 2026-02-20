@@ -56,6 +56,7 @@ const START_POSITIONS = [
 // ─── Game state ───────────────────────────────────────────────────────────────
 const players = {};
 const slots   = [false, false];   // which player slots are occupied
+let   gameOver = false;
 
 io.on('connection', (socket) => {
   const slot = slots.findIndex(s => !s);
@@ -72,6 +73,7 @@ io.on('connection', (socket) => {
     position: { ...START_POSITIONS[slot] },
     yaw:      0,
     health:   100,
+    lives:    3,
     dead:     false,
   };
 
@@ -104,21 +106,35 @@ io.on('connection', (socket) => {
   // ── Hit registration (shooter-authoritative) ──────────────────────────────
   socket.on('hit', ({ targetId }) => {
     const target = players[targetId];
-    if (!target || target.dead) return;
+    if (!target || target.dead || gameOver) return;
     target.health = Math.max(0, target.health - 25);
     io.emit('playerHit', { targetId, health: target.health });
     if (target.health <= 0) {
       target.dead = true;
-      io.emit('playerKilled', { targetId, killerId: socket.id });
-      setTimeout(() => {
-        const t = players[targetId];
-        if (!t) return;
-        t.health   = 100;
-        t.dead     = false;
-        t.position = { ...START_POSITIONS[t.slot] };
-        io.emit('playerRespawned', { id: targetId, position: t.position });
-      }, 3000);
+      target.lives = Math.max(0, target.lives - 1);
+      io.emit('playerKilled', { targetId, killerId: socket.id, lives: target.lives });
+      if (target.lives > 0) {
+        setTimeout(() => {
+          const t = players[targetId];
+          if (!t) return;
+          t.health   = 100;
+          t.dead     = false;
+          t.position = { ...START_POSITIONS[t.slot] };
+          io.emit('playerRespawned', { id: targetId, position: t.position });
+        }, 3000);
+      } else {
+        gameOver = true;
+        io.emit('gameOver', { loserId: targetId, winnerId: socket.id });
+      }
     }
+  });
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
+  socket.on('chat', (msg) => {
+    const p = players[socket.id];
+    if (!p) return;
+    const text = String(msg).slice(0, 200);
+    io.emit('chatMsg', { slot: p.slot, text });
   });
 
   // ── Disconnect ────────────────────────────────────────────────────────────
@@ -126,6 +142,7 @@ io.on('connection', (socket) => {
     slots[slot] = false;
     delete players[socket.id];
     io.emit('playerLeft', socket.id);
+    if (Object.keys(players).length === 0) gameOver = false;
   });
 });
 

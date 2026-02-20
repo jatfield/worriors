@@ -61,11 +61,21 @@
       white-space: nowrap;
     }
 
-    /* Health bars */
-    #hud {
+    /* ── Left HUD panel ───────────────────────────────── */
+    #leftPanel {
       position: absolute;
-      bottom: 22px; left: 18px;
+      bottom: 10px; left: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      align-items: flex-start;
     }
+
+    /* Lives canvas */
+    #livesCanvas { image-rendering: pixelated; }
+
+    /* Health bars */
+    #hud { /* flows inside #leftPanel */ }
     .hbar-row {
       display: flex; align-items: center;
       margin-bottom: 7px; gap: 8px;
@@ -90,6 +100,13 @@
       height: 100%; width: 100%;
       background: #FF4444;
       transition: width 0.25s ease;
+    }
+
+    /* Minimap canvas */
+    #minimapCanvas {
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 3px;
+      image-rendering: pixelated;
     }
 
     /* Player colour label */
@@ -121,8 +138,9 @@
       text-align: center;
       text-shadow: 0 0 18px currentColor;
     }
-    #deathMsg { color: #FF4444; }
-    #killMsg  { color: #44FF88; }
+    #deathMsg    { color: #FF4444; }
+    #killMsg     { color: #44FF88; }
+    #gameOverMsg { color: #FFD700; font-size: 2.6rem; }
 
     /* Pointer-lock prompt */
     #lockPrompt {
@@ -135,14 +153,72 @@
       pointer-events: none;
     }
 
-    /* Controls hint */
+    /* Controls hint – top-left */
     #controls {
       position: absolute;
-      bottom: 18px; right: 16px;
+      top: 38px; left: 10px;
       font-size: 0.62rem;
       color: rgba(255,255,255,0.3);
       line-height: 1.8;
-      text-align: right;
+    }
+
+    /* ── Chat panel (bottom-right, outside gameUI) ────── */
+    #chatPanel {
+      display: none;
+      position: fixed;
+      bottom: 10px; right: 10px;
+      width: 252px;
+      background: rgba(4,4,20,0.80);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 4px;
+      z-index: 10;
+      pointer-events: all;
+      font-size: 0.7rem;
+      font-family: 'Courier New', Courier, monospace;
+      color: #ccc;
+    }
+    #chatLog {
+      height: 130px;
+      overflow-y: auto;
+      padding: 6px 8px;
+      line-height: 1.55;
+      word-break: break-word;
+    }
+    #chatLog::-webkit-scrollbar { width: 4px; }
+    #chatLog::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+    #chatInputRow {
+      display: flex;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+    #chatInput {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: rgba(255,255,255,0.9);
+      padding: 5px 8px;
+      font-family: inherit;
+      font-size: 0.7rem;
+    }
+    #chatInput::placeholder { color: rgba(255,255,255,0.22); }
+    #chatSend {
+      background: rgba(255,255,255,0.07);
+      border: none;
+      border-left: 1px solid rgba(255,255,255,0.1);
+      color: rgba(255,255,255,0.6);
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    #chatSend:hover { background: rgba(255,255,255,0.14); }
+    /* Hint shown before game starts */
+    #chatHint {
+      position: fixed;
+      bottom: 10px; right: 10px;
+      font-size: 0.62rem;
+      color: rgba(255,255,255,0.22);
+      pointer-events: none;
+      z-index: 5;
     }
   </style>
 </head>
@@ -160,29 +236,46 @@
     <div id="statusMsg">Waiting for opponent…</div>
     <div id="myColorLabel"></div>
 
-    <div id="hud">
-      <div class="hbar-row">
-        <span class="hbar-label" id="myLabel">YOU</span>
-        <div class="hbar-track"><div id="myHealthBar"></div></div>
+    <!-- Left panel: lives → health bars → minimap -->
+    <div id="leftPanel">
+      <canvas id="livesCanvas" width="100" height="44"></canvas>
+      <div id="hud">
+        <div class="hbar-row">
+          <span class="hbar-label" id="myLabel">YOU</span>
+          <div class="hbar-track"><div id="myHealthBar"></div></div>
+        </div>
+        <div class="hbar-row">
+          <span class="hbar-label" style="color:#FF8888">ENEMY</span>
+          <div class="hbar-track"><div id="enemyHealthBar"></div></div>
+        </div>
       </div>
-      <div class="hbar-row">
-        <span class="hbar-label" style="color:#FF8888">ENEMY</span>
-        <div class="hbar-track"><div id="enemyHealthBar"></div></div>
-      </div>
+      <canvas id="minimapCanvas" width="180" height="180"></canvas>
     </div>
 
     <div class="bigmsg" id="deathMsg">YOU DIED<br><small style="font-size:0.4em">Respawning…</small></div>
     <div class="bigmsg" id="killMsg">ENEMY ELIMINATED!</div>
+    <div class="bigmsg" id="gameOverMsg"></div>
 
     <div id="controls">
       WASD / ↑↓←→ — Move<br>
       Mouse — Look<br>
-      Click — Fire laser
+      Click — Shoot<br>
+      T — Chat
     </div>
   </div>
 
   <div id="damageFlash"></div>
   <div id="lockPrompt">CLICK TO LOCK MOUSE &amp; PLAY</div>
+
+  <!-- Chat panel (outside gameUI so it can receive pointer events) -->
+  <div id="chatPanel">
+    <div id="chatLog"></div>
+    <div id="chatInputRow">
+      <input id="chatInput" type="text" placeholder="Message… (Enter to send)" maxlength="200" autocomplete="off" />
+      <button id="chatSend">➤</button>
+    </div>
+  </div>
+  <div id="chatHint">[T] Chat</div>
 
   <!-- Three.js r128 (served locally) -->
   <script src="/three.min.js"></script>
